@@ -1,0 +1,226 @@
+
+先看看LengthFieldBasedFrameDecoder的官方API
+http://docs.jboss.org/netty/3.1/api/org/jboss/netty/handler/codec/frame/LengthFieldBasedFrameDecoder.html
+
+API举例说明了LengthFieldBasedFrameDecoder的解析机制，如下：
+
+实际消息内容是“HELLO, WORLD”，长度是12 bytes（注意逗号后面有一个空格）
+
+实例1
+lengthFieldLength   = 2表示“Length”的长度，而“Length”的值
+就是“Actual Content”的长度（0x000C， 也就是12）：
+
+lengthFieldOffset   = 0
+lengthFieldLength   = 2
+lengthAdjustment    = 0
+initialBytesToStrip = 0 (= do not strip header)
+
+BEFORE DECODE (14 bytes)         AFTER DECODE (14 bytes)
++--------+----------------+      +--------+----------------+
+| Length | Actual Content |----->| Length | Actual Content |
+| 0x000C | "HELLO, WORLD" |      | 0x000C | "HELLO, WORLD" |
++--------+----------------+      +--------+----------------+
+
+实例2
+initialBytesToStrip = 2 表示在decode时，要去掉多少个字节
+在这个例子，表示要去掉“Length”（2个字节）
+可以看到，AFTER DECODE后，“Length”没有了，只剩下“Actual Content”：
+
+lengthFieldOffset   = 0
+lengthFieldLength   = 2
+lengthAdjustment    = 0
+initialBytesToStrip = 2 (= the length of the Length field)
+
+BEFORE DECODE (14 bytes)         AFTER DECODE (12 bytes)
++--------+----------------+      +----------------+
+| Length | Actual Content |----->| Actual Content |
+| 0x000C | "HELLO, WORLD" |      | "HELLO, WORLD" |
++--------+----------------+      +----------------+
+
+实例3
+与实例1不同，这里“Length”的值不是“Actual Content”的长度，而是
+整个消息的长度（0x000E，14  = 2  + 12）。用lengthAdjustment=-2来表示
+“Actual Content”的长度要减2：
+wholeLength = valueOf(Length) = 14
+actualContentLength = wholeLength + lengthAdjustment = 14 + (-2)=12
+
+lengthFieldOffset   =  0
+lengthFieldLength   =  2
+lengthAdjustment    = -2 (= the length of the Length field)
+initialBytesToStrip =  0
+
+BEFORE DECODE (14 bytes)         AFTER DECODE (14 bytes)
++--------+----------------+      +--------+----------------+
+| Length | Actual Content |----->| Length | Actual Content |
+| 0x000E | "HELLO, WORLD" |      | 0x000E | "HELLO, WORLD" |
++--------+----------------+      +--------+----------------+
+
+实例4
+这个例子多了一个“Header 1”（oxCAFE，长度为2 ）
+用 lengthFieldOffset   = 2表示“Length”从第3个字节开始
+“Length”的值仍然是“Actual Content ”的长度，不过“Length”自身的
+长度是3 （值是0x00000C，而不是上面的0x000C）
+
+lengthFieldOffset   = 2 (= the length of Header 1)
+lengthFieldLength   = 3
+lengthAdjustment    = 0
+initialBytesToStrip = 0
+
+BEFORE DECODE (17 bytes)                      AFTER DECODE (17 bytes)
++----------+----------+----------------+      +----------+----------+----------------+
+| Header 1 |  Length  | Actual Content |----->| Header 1 |  Length  | Actual Content |
+|  0xCAFE  | 0x00000C | "HELLO, WORLD" |      |  0xCAFE  | 0x00000C | "HELLO, WORLD" |
++----------+----------+----------------+      +----------+----------+----------------+
+
+实例5
+与实例4不同的地方是，“Length”和“Header 1”的位置调换了
+wholeLength = valueOf(Length) = 14
+actualContentLength = wholeLength + lengthAdjustment = 14 + 2=16
+因此在decode时，会认为“Header 1”也是“Actual Content”的一部分
+
+lengthFieldOffset   = 0
+lengthFieldLength   = 3
+lengthAdjustment    = 2 (= the length of Header 1)
+initialBytesToStrip = 0
+
+BEFORE DECODE (17 bytes)                      AFTER DECODE (17 bytes)
++----------+----------+----------------+      +----------+----------+----------------+
+|  Length  | Header 1 | Actual Content |----->|  Length  | Header 1 | Actual Content |
+| 0x00000C |  0xCAFE  | "HELLO, WORLD" |      | 0x00000C |  0xCAFE  | "HELLO, WORLD" |
++----------+----------+----------------+      +----------+----------+----------------+
+
+实例6
+看起来要比之前的例子复杂一些，但其实是上面例子的组合
+lengthFieldOffset = 1表示“Length”从第2个字节开始
+lengthFieldLength   = 2表示“Length”的长度是2
+lengthAdjustment    = 1表示“HDR2”的长度是1：
+wholeLength = valueOf(Length) = 0x000C = 12
+actualContentLength = wholeLength + lengthAdjustment = 12 + 1=13
+decode时，会认为“Length”后面的13个字节都是“Actual Content”，
+因此会认为“HDR2”也是“Actual Content”的一部分
+initialBytesToStrip = 3 表示decode时，去掉3个字节
+
+lengthFieldOffset   = 1 (= the length of HDR1)
+lengthFieldLength   = 2
+lengthAdjustment    = 1 (= the length of HDR2)
+initialBytesToStrip = 3 (= the length of HDR1 + LEN)
+
+BEFORE DECODE (16 bytes)                       AFTER DECODE (13 bytes)
++------+--------+------+----------------+      +------+----------------+
+| HDR1 | Length | HDR2 | Actual Content |----->| HDR2 | Actual Content |
+| 0xCA | 0x000C | 0xFE | "HELLO, WORLD" |      | 0xFE | "HELLO, WORLD" |
++------+--------+------+----------------+      +------+----------------+
+
+实例7
+与实例6不同的是，lengthAdjustment = -3，是负数
+因此，
+wholeLength = valueOf(Length) = 0x0010 = 16
+actualContentLength = wholeLength + lengthAdjustment = 16 + (-3)=13
+decode时，会认为“Length”后面的13个字节都是“Actual Content”，
+最终效果与实例6一样
+
+lengthFieldOffset   =  1
+lengthFieldLength   =  2
+lengthAdjustment    = -3 (= the length of HDR1 + LEN, negative)
+initialBytesToStrip =  3
+
+BEFORE DECODE (16 bytes)                       AFTER DECODE (13 bytes)
++------+--------+------+----------------+      +------+----------------+
+| HDR1 | Length | HDR2 | Actual Content |----->| HDR2 | Actual Content |
+| 0xCA | 0x0010 | 0xFE | "HELLO, WORLD" |      | 0xFE | "HELLO, WORLD" |
++------+--------+------+----------------+      +------+----------------+
+
+API看完，我们来看看源码（只保留关键代码）：
+
+public class LengthFieldBasedFrameDecoder extends FrameDecoder {
+
+    private final int maxFrameLength;	//超出此长度的Frame将被丢弃
+    private final int lengthFieldOffset;
+    private final int lengthFieldLength;
+    private final int lengthFieldEndOffset;		//这个值等于lengthFieldOffset + lengthFieldLength
+    private final int lengthAdjustment;
+    private final int initialBytesToStrip;
+	
+	protected Object decode(
+            ChannelHandlerContext ctx, Channel channel, ChannelBuffer buffer) throws Exception {
+			
+		//数据未完整，先不处理
+        if (buffer.readableBytes() < lengthFieldEndOffset) {
+            return null;
+        }
+		
+		/*
+		先读取“Length”的值
+		在LengthFieldBasedFrameDecoder的构造函数中，限定了“Length”的长度：
+		“lengthFieldLength must be either 1, 2, 3, 4, or 8”
+		单位是bytes。这个限定不知从何而来，先不管
+		由于接收到的数据的类型是ChannelBuffer，也就是byte[]，那么在读取时，
+		就应该根据长度来分割数据
+		例如，lengthFieldLength=3，说明读取前3个字节就得到“Length”的值
+		读取时，用到了位操作，ByteOrder是BIG_ENDIAN，因此高位在前，要左移位：
+		public int getUnsignedMedium(int index) {
+			return  (array[index]     & 0xff) << 16 |
+					(array[index + 1] & 0xff) <<  8 |
+					(array[index + 2] & 0xff) <<  0;
+		}
+		注意到，这个方法不会改变readerIndex
+		下面代码的frameLength，其实就是上面API分析时提到的valueOf(Length)
+		*/
+        int actualLengthFieldOffset = buffer.readerIndex() + lengthFieldOffset;
+        long frameLength;
+        switch (lengthFieldLength) {
+        case 1:
+            frameLength = buffer.getUnsignedByte(actualLengthFieldOffset);
+            break;
+        case 2:
+            frameLength = buffer.getUnsignedShort(actualLengthFieldOffset);
+            break;
+        case 3:
+            frameLength = buffer.getUnsignedMedium(actualLengthFieldOffset);
+            break;
+        case 4:
+            frameLength = buffer.getUnsignedInt(actualLengthFieldOffset);
+            break;
+        case 8:
+            frameLength = buffer.getLong(actualLengthFieldOffset);
+            break;
+        default:
+            throw new Error("should not reach here");
+        }
+
+		//如分析API时所说，要加上lengthAdjustment
+		//那为什么 还要加上lengthFieldEndOffset？
+		//加上之后，frameLength就代表整个frame的长度了，包括前缀和“Actual Content”
+        frameLength += lengthAdjustment + lengthFieldEndOffset;
+
+        int frameLengthInt = (int) frameLength;
+		
+		//数据未完整，先不处理
+        if (buffer.readableBytes() < frameLengthInt) {
+            return null;
+        }
+
+		//readerIndex往后移，跳过指定的字节，不读取
+        buffer.skipBytes(initialBytesToStrip);
+
+        // extract frame ，读取消息的内容
+        int readerIndex = buffer.readerIndex();
+        int actualFrameLength = frameLengthInt - initialBytesToStrip;
+        ChannelBuffer frame = extractFrame(buffer, readerIndex, actualFrameLength);
+		
+		//extractFrame方法不改变buffer的readerIndex，因此要手动设置
+        buffer.readerIndex(readerIndex + actualFrameLength);
+        return frame;
+    }
+	
+	//这个方法创建了新的ChannelBuffer，不影响原buffer
+	protected ChannelBuffer extractFrame(ChannelBuffer buffer, int index, int length) {
+        ChannelBuffer frame = buffer.factory().getBuffer(length);
+        frame.writeBytes(buffer, index, length);
+        return frame;
+    }
+}
+	
+ 
+ 
+ 

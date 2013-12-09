@@ -1,0 +1,176 @@
+ 
+ 看DelimiterBasedFrameDecoder的API，有举例：
+ 接收到的ChannelBuffer如下：
+ +--------------+
+ | ABC\nDEF\r\n |
+ +--------------+
+ 经过DelimiterBasedFrameDecoder(Delimiters.lineDelimiter())之后，得到：
+ +-----+-----+
+ | ABC | DEF |
+ +-----+-----+
+而不是
+ +----------+
+ | ABC\nDEF |
+ 
+ 为什么 ？
+
+ 首先要明确，如果不指定，DelimiterBasedFrameDecoder默认会去掉分隔符
+ 
+其次看看Delimiters.lineDelimiter()，它返回两组delimiter，分别对应windows和linux的换行符
+     public static ChannelBuffer[] lineDelimiter() {
+        return new ChannelBuffer[] {
+                ChannelBuffers.wrappedBuffer(new byte[] { '\r', '\n' }),
+                ChannelBuffers.wrappedBuffer(new byte[] { '\n' }),
+        };
+    }
+考察这两组分隔符
+
+方案一	
+采用“\r\n”作为分隔，则返回
+frameA = "ABC\nDEF"
+
+方案二
+采用“\n”返回
+frameB_0 = "ABC"
+frameB_1 = "DEF\r"
+
+由于frameB_0的长度比frameA短，因此在这个例子中，会采用方案二
+ 
+但有个问题，为什么不是比较全部，而是只比较frameB_0？
+要知道，length(frameA) = length(frameB_0) + length(frameB_1)，两者相等
+
+刚开始，我还以为跟split一样，方案二会一次性返回“ABCDEF\r”
+实际上不是
+它是遇到一个分隔符，就返回一个结果
+
+可以通过下面的代码证明：
+public class ClientHandler extends SimpleChannelUpstreamHandler {
+    @Override
+    public void channelConnected(ChannelHandlerContext ctx, ChannelStateEvent e)
+            throws Exception {
+        String msg = "ABC\nDEF\r\n";
+        ChannelBuffer buff = ChannelBuffers.buffer(msg.length());
+        buff.writeBytes(msg.getBytes());
+        e.getChannel().write(buff);
+    }
+}
+
+Server：
+        bootstrap.setPipelineFactory(new ChannelPipelineFactory() {
+            public ChannelPipeline getPipeline() throws Exception {
+                ChannelPipeline pipeline = Channels.pipeline();
+				
+				//这里设置：不删除分隔符，方便观察
+                pipeline.addLast("handler1", new DelimiterBasedFrameDecoder(8192, false, Delimiters.lineDelimiter()));
+                pipeline.addLast("handler2", new ServerStringHandler());		//打印decode后的结果
+                return pipeline;
+            }
+        });
+		
+public class ServerStringHandler extends SimpleChannelUpstreamHandler{
+
+    @Override
+    public void messageReceived(ChannelHandlerContext ctx, MessageEvent e)
+            throws Exception {
+        ChannelBuffer buff = (ChannelBuffer)e.getMessage();
+        String msg = (String)buff.toString(Helper.CHARSET_UTF8);
+        
+        //String s = "abc\n"; 则msg_escape 会原样输出“abc\n”，而不是“abc”外加一个换行
+        String msg_escape = StringEscapeUtils.escapeJava(msg);  
+        System.out.println("msg = " + msg_escape);
+    }
+}		
+
+结果ServerStringHandler会分两次输出：
+msg = ABC\n
+msg = DEF\r\n
+
+查看源码，会更清楚：
+
+public class DelimiterBasedFrameDecoder extends FrameDecoder {
+
+    private final ChannelBuffer[] delimiters;
+    private final int maxFrameLength;
+	
+	/*返回结果中，是否去掉分隔符
+	通常的调用是去掉分隔符，例如
+	new DelimiterBasedFrameDecoder(8192, Delimiters.lineDelimiter())
+	等价于
+	new DelimiterBasedFrameDecoder(8192, /*stripDelimiter=*/true, Delimiters.lineDelimiter())
+	*/
+    private final boolean stripDelimiter;	
+	
+	@Override
+    protected Object decode(
+            ChannelHandlerContext ctx, Channel channel, ChannelBuffer buffer) throws Exception {
+        // Try all delimiters and choose the delimiter which yields the shortest frame.
+        int minFrameLength = Integer.MAX_VALUE;
+        ChannelBuffer minDelim = null;
+		
+		/*迭代每一个delimiter，都尝试进行decode，
+		然后选择返回“shortest frame”的那个delimiter
+		重点在indexOf这个方法
+		*/
+        for (ChannelBuffer delim: delimiters) {
+            int frameLength = indexOf(buffer, delim);
+            if (frameLength >= 0 && frameLength < minFrameLength) {
+                minFrameLength = frameLength;
+                minDelim = delim;
+            }
+        }
+
+        if (minDelim != null) {
+            int minDelimLength = minDelim.capacity();
+            ChannelBuffer frame;
+            if (stripDelimiter) {
+                frame = buffer.readBytes(minFrameLength);
+                buffer.skipBytes(minDelimLength);	//去掉分隔符
+            } else {
+                frame = buffer.readBytes(minFrameLength + minDelimLength);
+            }
+
+            return frame;
+        }
+    }
+	
+	/*
+	对frame（haystack）进行搜索，找到第一个delimiter（needle），这个位置记为i
+	返回 （i - haystack.readerIndex），也就是分隔后第一个sub frame的长度
+	可以看到，它是“找到一个，就返回一个”
+	*/
+	private static int indexOf(ChannelBuffer haystack, ChannelBuffer needle) {
+		//遍历haystack的每一个字节
+        for (int i = haystack.readerIndex(); i < haystack.writerIndex(); i ++) {
+            int haystackIndex = i;
+            int needleIndex;
+			
+			/*haystack是否出现了delimiter，注意delimiter是一个ChannelBuffer（byte[]）
+			例如对于haystack="ABC\r\nDEF"，needle="\r\n"
+			那么当haystackIndex=3时，找到了“\r”，此时needleIndex=0
+			继续执行循环，haystackIndex++，needleIndex++，
+			找到了“\n”
+			至此，整个needle都匹配到了
+			程序然后执行到if (needleIndex == needle.capacity())，返回结果
+			*/
+            for (needleIndex = 0; needleIndex < needle.capacity(); needleIndex ++) {
+                if (haystack.getByte(haystackIndex) != needle.getByte(needleIndex)) {
+                    break;
+                } else {
+                    haystackIndex ++;
+                    if (haystackIndex == haystack.writerIndex() &&
+                        needleIndex != needle.capacity() - 1) {
+                        return -1;
+                    }
+                }
+            }
+
+            if (needleIndex == needle.capacity()) {
+                // Found the needle from the haystack!
+                return i - haystack.readerIndex();
+            }
+        }
+        return -1;
+    }
+
+	
+}
