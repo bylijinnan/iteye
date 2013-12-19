@@ -1,0 +1,66 @@
+
+Netty3的API
+[url]http://docs.jboss.org/netty/3.2/api/org/jboss/netty/channel/ChannelPipeline.html[/url]
+里面提到ChannelPipeline的一个“pitfall”：
+如果ChannelPipeline只有一个handler（假设为handlerA）且希望用另一handler（假设为handlerB）
+来取代handlerA去完成剩下的工作，那就要先add handlerB再remove handerA：
+
+[code="java"]
+
+Pitfall
+
+Due to the internal implementation detail of the current default ChannelPipeline, the following code does not work as expected if FirstHandler is the last handler in the pipeline:
+
+ public class FirstHandler extends SimpleChannelUpstreamHandler {
+
+     @Override
+     public void messageReceived(ChannelHandlerContext ctx, MessageEvent e) {
+         // Remove this handler from the pipeline,
+         ctx.getPipeline().remove(this);
+         // And let SecondHandler handle the current event.
+         ctx.getPipeline().addLast("2nd", new SecondHandler());
+         ctx.sendUpstream(e);
+     }
+ }
+ 
+[/code]
+
+正确的做法是
+        ctx.getPipeline().addLast("2nd", new SecondHandler());
+		ctx.getPipeline().remove(this);
+		 
+我的测试代码：
+[url]https://github.com/bylijinnan/nettyLearn/tree/master/ljn-netty3-learn/src/main/java/com/ljn/handler/pitfall[/url]
+
+这是为什么呢？
+
+问题出在ctx.sendUpstream(e)：
+[code="java"]
+
+public class DefaultChannelPipeline implements ChannelPipeline {
+
+    private final class DefaultChannelHandlerContext implements ChannelHandlerContext {
+
+		public void sendUpstream(ChannelEvent e) {
+			
+			//下面的this是DefaultChannelHandlerContext
+            DefaultChannelHandlerContext next = getActualUpstreamContext(this.next);
+            if (next != null) {
+                DefaultChannelPipeline.this.sendUpstream(next, e);
+            }
+        }
+	}
+	
+}
+		
+[/code]
+
+当ChannelPipe只有一个handler（也就是只有一个ChannelHandlerContext，代码中的ctx）时，
+ctx.next = null
+在sendUpstream方法的
+DefaultChannelHandlerContext next = getActualUpstreamContext(this.next);
+返回的next=null，没有继续往下执行
+因此Upstream的处理就中断了
+
+
+
