@@ -10,20 +10,24 @@ Netty的启动及事件处理的流程，基本上是按照上面这篇文章来
 由于流程涉及到比较多的类和方法，我提取一下Netty的骨架：
 
 [code="java"]
+
 ServerBootstrap.bind(localAddress)
-	                  |-->newServerSocketChannel & fireChannelOpen	（得到ServerSocketChannel[server]）
--->Binder.channelOpen
-	         |-->Channels.bind(that is : sendDownstream of ChannelState.BOUND)
+|-->newServerSocketChannel & fireChannelOpen	（得到ServerSocketChannel[server]）
+
 -->
-  In DefaultChannelPipeline, No downstreamHandler, jump to 
-  NioServerSocketPipelineSink.bind	（关键）
-										|-->1.do the REAL java.net.ServerSocket.bind	（server绑定端口）
-											  2.start bossThread in bossExecutor
-											  3.do "accept and dispatch" in a endless loop of bossThread（accept得到SocketChannel[client]）
-												 |--> registerAcceptedChannel, start worker in workerPool
-													   |-->worker.run
-															 |-->processSelectedKeys(selector.selectedKeys())
-																   |--> read & fireMessageReceived	（开始调用各Handler）
+Binder.channelOpen
+|-->Channels.bind(that is : sendDownstream of ChannelState.BOUND)
+
+-->
+In DefaultChannelPipeline, No downstreamHandler, jump to 
+NioServerSocketPipelineSink.bind	（关键）
+|-->1.do the REAL java.net.ServerSocket.bind	（server绑定端口）
+	  2.start bossThread in bossExecutor
+	  3.do "accept & dispatch" in a endless loop of bossThread（得到SocketChannel[client]）
+		 |--> registerAcceptedChannel, start worker in workerPool
+			   |-->worker.run
+					 |-->processSelectedKeys(selector.selectedKeys())
+						   |--> read & fireMessageReceived	（开始调用各Handler）
 
 [/code]
 
@@ -215,7 +219,7 @@ class NioServerSocketPipelineSink extends AbstractNioChannelSink {
         }
     }
 }
-
+[/code]
 
 worker.register，主要工作是创建registerTask（implements Runnable）并放入registerTaskQueue
 对应的类是NioWorker 和AbstractNioWorker：
@@ -311,10 +315,35 @@ private void processSelectedKeys(Set<SelectionKey> selectedKeys) throws IOExcept
 	*/
 	protected boolean read(SelectionKey k) {
 	
-		//为什么会有两个Channel
+		/*
+		变量“ch”的类型是java.nio.channels.SocketChannel，是“the channel for which this key was created”
+		变量“channel”的类型是org.jboss.netty.channel.socket.nio.NioSocketChannel，是“the attachment for which this key was created”
+		因此，“ch”的作用就是读数据，而“channel”的作用则是取得pipeline后开始处理数据
+		
+		但，“channel”似乎是“包含”了“ch”？
+		我们知道，org.jboss.netty.channel.socket.nio.NioSocketChannel是对java.nio.channels.SocketChannel的封装，
+		正如org.jboss.netty.channel.socket.nio.NioServerSocketChannel是对java.nio.channels.ServerSocketChannel的封装
+		而查看RegisterTask的run方法，register并返回SelectionKey：
+		channel.channel.register(
+                            selector, channel.getRawInterestOps(), channel);
+		变量的命名让人糊涂，翻译一下：
+		acceptedNioSocketChannel.channel.register(selector, ops, acceptedNioSocketChannel)
+		注意到acceptedNioSocketChannel.channel的真实类型，其实就是java.nio.channels.SocketChannel，
+		它就是下面代码里的“acceptedSocket”：
+		worker.register(new NioAcceptedSocketChannel(
+                        channel.getFactory(), pipeline, channel,
+                        NioServerSocketPipelineSink.this, acceptedSocket,
+                        worker, currentThread), null);
+		因此，是不是可以认为“channel”与“ch”的关系是：
+		ch = channel.channel
+		*/
+		
+		
 		final SocketChannel ch = (SocketChannel) k.channel();
 		final NioSocketChannel channel = (NioSocketChannel) k.attachment();
 
+		//会根据这一次接收到的数据的大小，来预测下一次接收数据的大小
+		//并以此为依据来决定ByteBuffer的大小
 		final ReceiveBufferSizePredictor predictor =
 			channel.getConfig().getReceiveBufferSizePredictor();
 		final int predictedRecvBufSize = predictor.nextReceiveBufferSize();
